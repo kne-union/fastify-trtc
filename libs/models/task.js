@@ -46,11 +46,8 @@ module.exports = ({ DataTypes, options }) => {
       comment: 'TRTC任务',
       indexes: [
         {
-          fields: ['task_id', 'delete_at'],
+          fields: ['task_id', 'deleted_at'],
           unique: true
-        },
-        {
-          fields: ['room_id']
         }
       ]
     }

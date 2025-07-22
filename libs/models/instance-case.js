@@ -29,7 +29,7 @@ module.exports = ({ DataTypes, options }) => {
       comment: 'trtc的使用实例',
       indexes: [
         {
-          fields: ['room_id', 'delete_at'],
+          fields: ['room_id', 'deleted_at'],
           unique: true
         }
       ]

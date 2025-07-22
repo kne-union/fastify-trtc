@@ -13,7 +13,7 @@ module.exports = ({ DataTypes, options }) => {
         allowNull: false
       },
       payload: {
-        type: DataTypes.STRING,
+        type: DataTypes.JSON,
         comment: '事件详情',
         defaultValue: {}
       }
