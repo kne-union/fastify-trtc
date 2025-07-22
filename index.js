@@ -7,7 +7,13 @@ module.exports = fp(
       {},
       {
         dbTableNamePrefix: 't_trtc_',
-        name: 'trtc'
+        name: 'trtc',
+        cos: {
+          region: '',
+          bucket: '',
+          accessKeyId: '',
+          accessKeySecret: ''
+        }
       },
       options
     );

@@ -2,19 +2,26 @@ module.exports = ({ DataTypes, options }) => {
   return {
     //name: 'modelName',//此处定义modelName，默认根据文件名转驼峰命名，可以缺省
     model: {
-      event: {
+      code: {
         type: DataTypes.STRING,
-        comment: '名称'
+        comment: 'code',
+        allowNull: false
+      },
+      time: {
+        type: DataTypes.DATE,
+        comment: 'time',
+        allowNull: false
+      },
+      payload: {
+        type: DataTypes.STRING,
+        comment: '事件详情',
+        defaultValue: {}
       }
     },
-    associate: (
-      {
-        /*这里可以获取models*/
-      },
-      fastify
-    ) => {
-      //可以这样获取某个namespace的models fastify.account.models
-      // options.getUserModel() 可以获取 user model
+    associate: ({ instanceEvent, instanceCase }) => {
+      instanceEvent.belongsTo(instanceCase, {
+        allowNull: false
+      });
     },
     options: {
       comment: '从trtc服务获取的事件列表'

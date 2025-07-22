@@ -150,6 +150,10 @@ module.exports = fp(async (fastify, options) => {
           Object.assign({}, args, {
             StorageParams: {
               CloudStorage: {
+                Region: options.cos.region,
+                Bucket: options.cos.bucket,
+                AccessKey: options.cos.accessKeyId,
+                SecretKey: options.cos.accessKeySecret,
                 Vendor: 0
               }
             },
