@@ -6,7 +6,7 @@ module.exports = fp(
     options = Object.assign(
       {},
       {
-        dbTableNamePrefix: 't_trtc_',
+        dbTableNamePrefix: '',
         name: 'trtc',
         cos: {
           region: '',
@@ -26,7 +26,8 @@ module.exports = fp(
         [
           'models',
           await fastify.sequelize.addModels(path.resolve(__dirname, './libs/models'), {
-            prefix: options.dbTableNamePrefix
+            prefix: options.dbTableNamePrefix,
+            modelPrefix: options.name
           })
         ],
         ['services', path.resolve(__dirname, './libs/services')]
