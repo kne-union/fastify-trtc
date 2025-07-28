@@ -65,27 +65,7 @@ module.exports = fp(async (fastify, options) => {
       return;
     }
 
-    const cosClient = createClient();
-
-    const fileList = await Promise.all(
-      FileList.map(async file => {
-        const url = cosClient.getObjectUrl({
-          Bucket: options.cos.bucket,
-          Region: options.cos.region,
-          Key: file,
-          Sign: true
-        });
-        const fileInfo = await fastify.fileManager.services.uploadFromUrl({ url });
-
-        await cosClient.deleteObject({
-          Bucket: options.cos.bucket,
-          Region: options.cos.region,
-          Key: file
-        });
-
-        return fileInfo;
-      })
-    );
+    const fileList = await services.cos.getFileIdsByFileKey({ keys: FileList });
 
     await task.update({
       result: fileList,
