@@ -70,7 +70,7 @@ module.exports = fp(async (fastify, options) => {
       UserSig: userSig.userSig,
       SdkAppId: userSig.sdkAppId,
       RoomId: roomId,
-      RoomIdType: 1
+      RoomIdType: 0
     });
 
     return await models.task.create({
@@ -82,7 +82,7 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const stopTask = async ({ id, roomId, callback }) => {
+  const getTask = async ({ id, roomId }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
     const task = await models.task.findByPk(id);
     if (!task) {
@@ -92,6 +92,11 @@ module.exports = fp(async (fastify, options) => {
     if (task.trtcInstanceCaseId !== instanceCase.id) {
       throw new Error('任务id和roomId不匹配');
     }
+    return task;
+  };
+
+  const stopTask = async ({ id, roomId, callback }) => {
+    const task = await getTask({ id, roomId });
     if (task.stopTime) {
       return task;
     }
@@ -181,13 +186,14 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const checkRecord = async ({ id }) => {
-    const { appId } = getTrtcParams();
-    const client = getTrtcClient();
-    return client.DescribeCloudRecording({
-      SdkAppId: appId,
-      TaskId: id
+  const checkRecord = async ({ id, roomId }) => {
+    const task = await getTask({ id, roomId });
+    const result = await services.cos.getFileIdsByPathName({ pathname: task.taskId });
+    await task.update({
+      result,
+      stopTime: new Date()
     });
+    return task;
   };
 
   const join = async ({ roomId, userId, options }) => {
