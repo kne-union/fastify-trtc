@@ -9,7 +9,7 @@ module.exports = fp(async (fastify, options) => {
   const { Op } = fastify.sequelize.Sequelize;
 
   const getTrtcParams = props => {
-    const params = Object.assign({}, props);
+    const params = Object.assign({}, options, props);
     if (typeof options.getParams === 'function') {
       return options.getParams(params);
     }
@@ -33,7 +33,7 @@ module.exports = fp(async (fastify, options) => {
     if (trtcClient) {
       return trtcClient;
     }
-    trtcClient = new TrtcClient(options.tencentcloud);
+    trtcClient = new TrtcClient(options);
     return trtcClient;
   };
 
@@ -78,7 +78,7 @@ module.exports = fp(async (fastify, options) => {
       taskId: TaskId,
       startRequestId: RequestId,
       startTime: new Date(),
-      instanceCaseId: instanceCase.id
+      trtcInstanceCaseId: instanceCase.id
     });
   };
 
@@ -89,11 +89,11 @@ module.exports = fp(async (fastify, options) => {
       throw new Error('任务id不存在');
     }
 
-    if (task.instanceCaseId !== instanceCase.id) {
+    if (task.trtcInstanceCaseId !== instanceCase.id) {
       throw new Error('任务id和roomId不匹配');
     }
     if (task.stopTime) {
-      return;
+      return task;
     }
     const { appId } = getTrtcParams();
     const client = getTrtcClient();
@@ -106,6 +106,8 @@ module.exports = fp(async (fastify, options) => {
       stopRequestId: RequestId,
       stopTime: new Date()
     });
+
+    return task;
   };
 
   const startAITranscription = async ({ roomId, language, hotWordList, options }) => {
@@ -140,11 +142,11 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const startRecord = async ({ roomId, options }) => {
+  const startRecord = async ({ roomId, options: targetOptions }) => {
     return startTask({
       type: 'record',
       roomId,
-      options,
+      options: targetOptions,
       callback: (client, args) => {
         return client.CreateCloudRecording(
           Object.assign({}, args, {
@@ -174,8 +176,17 @@ module.exports = fp(async (fastify, options) => {
       id,
       roomId,
       callback: (client, args) => {
-        return client.DeleteCloudRecording({}, args);
+        return client.DeleteCloudRecording(Object.assign({}, args));
       }
+    });
+  };
+
+  const checkRecord = async ({ id }) => {
+    const { appId } = getTrtcParams();
+    const client = getTrtcClient();
+    return client.DescribeCloudRecording({
+      SdkAppId: appId,
+      TaskId: id
     });
   };
 
@@ -284,6 +295,7 @@ module.exports = fp(async (fastify, options) => {
     join,
     exit,
     dismiss,
-    removeMember
+    removeMember,
+    checkRecord
   });
 });
