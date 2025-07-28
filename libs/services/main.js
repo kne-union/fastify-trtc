@@ -188,11 +188,16 @@ module.exports = fp(async (fastify, options) => {
 
   const checkRecord = async ({ id, roomId }) => {
     const task = await getTask({ id, roomId });
+    if (task.result) {
+      return task;
+    }
     const result = await services.cos.getFileIdsByPathName({ pathname: task.taskId });
-    await task.update({
-      result,
-      stopTime: new Date()
-    });
+    if (result && result.length > 0) {
+      await task.update({
+        result,
+        stopTime: new Date()
+      });
+    }
     return task;
   };
 
