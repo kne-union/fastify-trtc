@@ -1,8 +1,16 @@
 const fp = require('fastify-plugin');
 const TLSSigAPIv2 = require('tls-sig-api-v2');
 const tencentcloud = require('tencentcloud-sdk-nodejs-trtc');
+const crypto = require('node:crypto');
 
 const TrtcClient = tencentcloud.trtc.v20190722.Client;
+
+function generateSecureRandomString(length) {
+  return crypto
+    .randomBytes(Math.ceil(length / 2))
+    .toString('hex')
+    .slice(0, length);
+}
 
 module.exports = fp(async (fastify, options) => {
   const { models, services } = fastify[options.name];
@@ -64,13 +72,12 @@ module.exports = fp(async (fastify, options) => {
   const startTask = async ({ roomId, type, options, callback }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
     const client = getTrtcClient();
-    const userSig = getUserSig(`${type}_${roomId}`, options);
+    const userSig = getUserSig(`${type}_${roomId}_${generateSecureRandomString(4)}`, options);
     const { RequestId, TaskId } = await callback(client, {
       UserId: userSig.userId,
       UserSig: userSig.userSig,
       SdkAppId: userSig.sdkAppId,
-      RoomId: roomId,
-      RoomIdType: 0
+      RoomId: roomId
     });
 
     return await models.task.create({
@@ -120,15 +127,16 @@ module.exports = fp(async (fastify, options) => {
       type: 'ai_transcription',
       roomId,
       options,
-      callback: (client, args) => {
+      callback: (client, { UserSig, UserId, ...args }) => {
         return client.StartAITranscription(
           Object.assign({}, args, {
+            RoomIdType: 1,
             TranscriptionParams: {
-              UserId: args.UserId,
-              UserSig: args.UserSig
+              UserId,
+              UserSig
             },
             RecognizeConfig: {
-              Language: language || options?.language,
+              Language: language || options?.language || 'zh',
               HotWordList: hotWordList || options?.hotWordList
             }
           })
@@ -141,8 +149,8 @@ module.exports = fp(async (fastify, options) => {
     return stopTask({
       id,
       roomId,
-      callback: (client, args) => {
-        return client.StopAITranscription(Object.assign({}, args));
+      callback: (client, { TaskId }) => {
+        return client.StopAITranscription(Object.assign({}, { TaskId }));
       }
     });
   };
@@ -155,6 +163,7 @@ module.exports = fp(async (fastify, options) => {
       callback: (client, args) => {
         return client.CreateCloudRecording(
           Object.assign({}, args, {
+            RoomIdType: 0,
             StorageParams: {
               CloudStorage: {
                 Region: options.cos.region,
