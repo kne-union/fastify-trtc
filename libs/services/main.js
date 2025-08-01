@@ -122,12 +122,27 @@ module.exports = fp(async (fastify, options) => {
     return task;
   };
 
-  const startAITranscription = async ({ roomId, language, hotWordList, options }) => {
+  const startAITranscription = async ({ roomId, language, hotWordList, taskId, options }) => {
     return startTask({
       type: 'ai_transcription',
       roomId,
       options,
-      callback: (client, { UserSig, UserId, ...args }) => {
+      callback: async (client, { UserSig, UserId, ...args }) => {
+        if (taskId) {
+          try {
+            const task = await getTask({ id: taskId, roomId });
+            const res = await client.DescribeAIConversation({
+              SdkAppId: args.sdkAppId,
+              TaskId: task.taskId
+            });
+            if (res.Status === 'InProgress') {
+              return res;
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        }
+
         return client.StartAITranscription(
           Object.assign({}, args, {
             RoomIdType: 1,
