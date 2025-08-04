@@ -5,13 +5,6 @@ const crypto = require('node:crypto');
 
 const TrtcClient = tencentcloud.trtc.v20190722.Client;
 
-function generateSecureRandomString(length) {
-  return crypto
-    .randomBytes(Math.ceil(length / 2))
-    .toString('hex')
-    .slice(0, length);
-}
-
 module.exports = fp(async (fastify, options) => {
   const { models, services } = fastify[options.name];
   const { Op } = fastify.sequelize.Sequelize;
@@ -72,7 +65,7 @@ module.exports = fp(async (fastify, options) => {
   const startTask = async ({ roomId, type, options, callback }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
     const client = getTrtcClient();
-    const userSig = getUserSig(`${type}_${roomId}_${generateSecureRandomString(4)}`, options);
+    const userSig = getUserSig(`${type}_${roomId}`, options);
     const { RequestId, TaskId } = await callback(client, {
       UserId: userSig.userId,
       UserSig: userSig.userSig,
