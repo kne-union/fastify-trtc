@@ -27,6 +27,9 @@ module.exports = fp(async (fastify, options) => {
     }
     return await Promise.all(
       Contents.map(async item => {
+        if (!fastify.fileManager?.services?.uploadFromUrl) {
+          return item.Key;
+        }
         const url = cos.getObjectUrl({
           Bucket: options.cos.bucket,
           Region: options.cos.region,
@@ -51,6 +54,9 @@ module.exports = fp(async (fastify, options) => {
     const cos = createClient();
     return await Promise.all(
       keys.map(async fileKey => {
+        if (!fastify.fileManager?.services?.uploadFromUrl) {
+          return fileKey;
+        }
         const url = cos.getObjectUrl({
           Bucket: options.cos.bucket,
           Region: options.cos.region,
