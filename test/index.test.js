@@ -117,24 +117,30 @@ describe('@kne/fastify-trtc', function () {
 
     // 注册 http-errors mock
     fastify.decorate('httpErrors', {
-      notFound: (msg) => {
+      notFound: msg => {
         const err = new Error(msg);
         err.statusCode = 404;
         return err;
       }
     });
 
-    await fastify.register(require('../index'), Object.assign({
-      appId: 1400000000,
-      appSecret: 'test-secret-key',
-      cos: {
-        region: 'ap-guangzhou',
-        bucket: 'test-bucket-1250000000',
-        accessKeyId: 'test-secret-id',
-        accessKeySecret: 'test-secret-key'
-      },
-      callbackKey: 'test-callback-key'
-    }, pluginOptions));
+    await fastify.register(
+      require('../index'),
+      Object.assign(
+        {
+          appId: 1400000000,
+          appSecret: 'test-secret-key',
+          cos: {
+            region: 'ap-guangzhou',
+            bucket: 'test-bucket-1250000000',
+            accessKeyId: 'test-secret-id',
+            accessKeySecret: 'test-secret-key'
+          },
+          callbackKey: 'test-callback-key'
+        },
+        pluginOptions
+      )
+    );
 
     await fastify.ready();
     await fastify.sequelize.sync({ force: true });
@@ -314,6 +320,7 @@ describe('@kne/fastify-trtc', function () {
 
       const startCall = mockTrtcCalls.find(item => item.method === 'CreateCloudRecording');
       expect(startCall.params.RoomId).to.equal(roomId);
+      expect(startCall.params.RoomIdType).to.equal(0);
       expect(startCall.params.StorageParams.CloudStorage.Bucket).to.equal('override-bucket');
       expect(startCall.params.RecordParams.OutputFormat).to.equal(4);
 
@@ -348,6 +355,32 @@ describe('@kne/fastify-trtc', function () {
       await task.reload();
       expect(task.stopTime).to.exist;
       expect(mockTrtcCalls.some(item => item.method === 'StopAITranscription')).to.be.true;
+      const stopCall = mockTrtcCalls.find(item => item.method === 'StopAITranscription');
+      expect(stopCall.params).to.include({ SdkAppId: 1400000000, TaskId: task.taskId });
+    });
+
+    it('should reuse active ai transcription task without creating duplicate task', async () => {
+      const roomId = 'room_ai_reuse_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+      const task = await fastify.trtc.services.startAITranscription({ roomId });
+      const startCallCount = mockTrtcCalls.filter(item => item.method === 'StartAITranscription').length;
+
+      const reusedTask = await fastify.trtc.services.startAITranscription({ roomId, taskId: task.id });
+
+      expect(reusedTask.id).to.equal(task.id);
+      expect(mockTrtcCalls.some(item => item.method === 'DescribeAIConversation' && item.params.SdkAppId === 1400000000 && item.params.TaskId === task.taskId)).to.be.true;
+      expect(mockTrtcCalls.filter(item => item.method === 'StartAITranscription').length).to.equal(startCallCount);
+      expect(await fastify.trtc.models.task.count({ where: { type: 'ai_transcription' } })).to.equal(1);
+    });
+
+    it('should support explicit string room type for record task', async () => {
+      const roomId = 'room_record_string_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+
+      await fastify.trtc.services.startRecord({ roomId, roomIdType: 1 });
+
+      const startCall = mockTrtcCalls.find(item => item.method === 'CreateCloudRecording');
+      expect(startCall.params.RoomIdType).to.equal(1);
     });
 
     it('should dismiss room and stop unfinished tasks', async () => {
@@ -778,11 +811,14 @@ describe('@kne/fastify-trtc', function () {
     });
 
     it('should filter events by code', async () => {
-      const result = await fastify.trtc.services.instanceEvent.list({}, {
-        filter: { code: '101' },
-        perPage: 10,
-        currentPage: 1
-      });
+      const result = await fastify.trtc.services.instanceEvent.list(
+        {},
+        {
+          filter: { code: '101' },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(result.totalCount).to.be.greaterThan(0);
       result.pageData.forEach(item => {
         expect(item.code).to.equal('101');
@@ -790,20 +826,26 @@ describe('@kne/fastify-trtc', function () {
     });
 
     it('should filter events by roomId', async () => {
-      const result = await fastify.trtc.services.instanceEvent.list({}, {
-        filter: { roomId: 'room_query_001' },
-        perPage: 10,
-        currentPage: 1
-      });
+      const result = await fastify.trtc.services.instanceEvent.list(
+        {},
+        {
+          filter: { roomId: 'room_query_001' },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(result.totalCount).to.be.greaterThan(0);
     });
 
     it('should return empty when roomId not found', async () => {
-      const result = await fastify.trtc.services.instanceEvent.list({}, {
-        filter: { roomId: 'non_existent_room' },
-        perPage: 10,
-        currentPage: 1
-      });
+      const result = await fastify.trtc.services.instanceEvent.list(
+        {},
+        {
+          filter: { roomId: 'non_existent_room' },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(result.totalCount).to.equal(0);
       expect(result.pageData.length).to.equal(0);
     });
@@ -844,11 +886,14 @@ describe('@kne/fastify-trtc', function () {
     });
 
     it('should return empty when roomId not found', async () => {
-      const result = await fastify.trtc.services.task.list({}, {
-        filter: { roomId: 'non_existent_room' },
-        perPage: 10,
-        currentPage: 1
-      });
+      const result = await fastify.trtc.services.task.list(
+        {},
+        {
+          filter: { roomId: 'non_existent_room' },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(result.totalCount).to.equal(0);
       expect(result.pageData.length).to.equal(0);
     });
@@ -908,10 +953,16 @@ describe('@kne/fastify-trtc', function () {
 
       expect(result).to.deep.equal(['file:video-001.mp4', 'file:video-002.mp4']);
       expect(mockCosCalls.find(item => item.method === 'getBucket').params.Prefix).to.equal('record-task/');
-      expect(mockCosCalls.filter(item => item.method === 'deleteObject').map(item => item.params.Key)).to.deep.equal([
-        'record-task/video-001.mp4',
-        'record-task/video-002.mp4'
-      ]);
+      expect(mockCosCalls.filter(item => item.method === 'deleteObject').map(item => item.params.Key)).to.deep.equal(['record-task/video-001.mp4', 'record-task/video-002.mp4']);
+    });
+
+    it('should return COS keys when fileManager is not registered', async () => {
+      mockBucketContents = [{ Key: 'record-task/video-001.mp4' }, { Key: 'record-task/video-002.mp4' }];
+
+      const result = await fastify.trtc.services.cos.getFileIdsByPathName({ pathname: 'record-task' });
+
+      expect(result).to.deep.equal(['record-task/video-001.mp4', 'record-task/video-002.mp4']);
+      expect(mockCosCalls.some(item => item.method === 'deleteObject')).to.be.false;
     });
 
     it('should upload COS files by file key and delete source objects', async () => {
@@ -975,6 +1026,32 @@ describe('@kne/fastify-trtc', function () {
       expect(response.statusCode).to.equal(200);
       const result = JSON.parse(response.body);
       expect(result.code).to.equal(0);
+    });
+
+    it('should return failure when dispatch fails and failOnWebhookDispatchError is enabled', async () => {
+      const fastifyFailOnDispatch = await buildFastify({ failOnWebhookDispatchError: true });
+      fastifyFailOnDispatch.trtc.services.webhook.dispatch = async () => {
+        throw new Error('dispatch failed');
+      };
+      const payload = {
+        EventGroupId: 1,
+        EventType: 101,
+        CallbackTs: Date.now(),
+        EventInfo: { RoomId: 'test', EventMsTs: Date.now() }
+      };
+      const body = JSON.stringify(payload);
+      const sign = crypto.createHmac('sha256', 'test-callback-key').update(body).digest('base64');
+
+      const response = await fastifyFailOnDispatch.inject({
+        method: 'POST',
+        url: '/api/trtc/callback',
+        headers: { 'content-type': 'application/json', sign },
+        payload
+      });
+
+      expect(response.statusCode).to.equal(500);
+      expect(JSON.parse(response.body).code).to.equal(1);
+      await fastifyFailOnDispatch.close();
     });
   });
 
@@ -1040,30 +1117,39 @@ describe('@kne/fastify-trtc', function () {
 
     it('should filter events by time range', async () => {
       const now = new Date();
-      const result = await fastify.trtc.services.instanceEvent.list({}, {
-        filter: {
-          startTime: now.toISOString(),
-          endTime: new Date(now.getTime() + 3600000).toISOString()
-        },
-        perPage: 10,
-        currentPage: 1
-      });
+      const result = await fastify.trtc.services.instanceEvent.list(
+        {},
+        {
+          filter: {
+            startTime: now.toISOString(),
+            endTime: new Date(now.getTime() + 3600000).toISOString()
+          },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(result).to.have.property('pageData');
     });
 
     it('should filter tasks by active status', async () => {
-      const activeResult = await fastify.trtc.services.task.list({}, {
-        filter: { active: true },
-        perPage: 10,
-        currentPage: 1
-      });
+      const activeResult = await fastify.trtc.services.task.list(
+        {},
+        {
+          filter: { active: true },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(activeResult).to.have.property('pageData');
 
-      const inactiveResult = await fastify.trtc.services.task.list({}, {
-        filter: { active: false },
-        perPage: 10,
-        currentPage: 1
-      });
+      const inactiveResult = await fastify.trtc.services.task.list(
+        {},
+        {
+          filter: { active: false },
+          perPage: 10,
+          currentPage: 1
+        }
+      );
       expect(inactiveResult).to.have.property('pageData');
     });
   });

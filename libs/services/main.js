@@ -16,8 +16,8 @@ module.exports = fp(async (fastify, options) => {
   };
 
   let tlsSigApi;
-  const getTlsSigApi = () => {
-    const { appId, appSecret } = getTrtcParams();
+  const getTlsSigApi = props => {
+    const { appId, appSecret } = getTrtcParams(props);
     if (!tlsSigApi || tlsSigApi.appId !== appId || tlsSigApi.appSecret !== appSecret) {
       tlsSigApi = { appId, appSecret, api: new TLSSigAPIv2.Api(appId, appSecret) };
     }
@@ -26,7 +26,7 @@ module.exports = fp(async (fastify, options) => {
 
   const getUserSig = (userId, props) => {
     const { appId, appSecret, expire } = getTrtcParams(props);
-    const api = getTlsSigApi();
+    const api = getTlsSigApi(props);
     const userSig = api.genUserSig(userId, expire || 60 * 10);
     return {
       sdkAppId: appId,
@@ -35,13 +35,20 @@ module.exports = fp(async (fastify, options) => {
     };
   };
 
-  let trtcClient;
+  const trtcClientMap = new Map();
 
-  const getTrtcClient = () => {
-    if (trtcClient) {
-      return trtcClient;
+  const getTrtcClient = props => {
+    const params = getTrtcParams(props);
+    const cacheKey = JSON.stringify({
+      credential: params.credential,
+      region: params.region,
+      profile: params.profile
+    });
+    if (trtcClientMap.has(cacheKey)) {
+      return trtcClientMap.get(cacheKey);
     }
-    trtcClient = new TrtcClient(options);
+    const trtcClient = new TrtcClient(params);
+    trtcClientMap.set(cacheKey, trtcClient);
     return trtcClient;
   };
 
@@ -71,7 +78,7 @@ module.exports = fp(async (fastify, options) => {
 
   const startTask = async ({ roomId, type, options, callback }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
-    const client = getTrtcClient();
+    const client = getTrtcClient(options);
     const userSig = getUserSig(`${type}_${roomId}`, options);
     const { RequestId, TaskId } = await callback(client, {
       UserId: userSig.userId,
@@ -102,13 +109,13 @@ module.exports = fp(async (fastify, options) => {
     return task;
   };
 
-  const stopTask = async ({ id, roomId, callback }) => {
+  const stopTask = async ({ id, roomId, options, callback }) => {
     const task = await getTask({ id, roomId });
     if (task.stopTime) {
       return task;
     }
-    const { appId } = getTrtcParams();
-    const client = getTrtcClient();
+    const { appId } = getTrtcParams(options);
+    const client = getTrtcClient(options);
     const { RequestId } = await callback(client, {
       SdkAppId: appId,
       TaskId: task.taskId
@@ -123,26 +130,27 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const startAITranscription = async ({ roomId, language, hotWordList, taskId, options }) => {
+    if (taskId) {
+      try {
+        const task = await getTask({ id: taskId, roomId });
+        const client = getTrtcClient(options);
+        const { appId } = getTrtcParams(options);
+        const res = await client.DescribeAIConversation({
+          SdkAppId: appId,
+          TaskId: task.taskId
+        });
+        if (res.Status === 'InProgress') {
+          return task;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
     return startTask({
       type: 'ai_transcription',
       roomId,
       options,
       callback: async (client, { UserSig, UserId, ...args }) => {
-        if (taskId) {
-          try {
-            const task = await getTask({ id: taskId, roomId });
-            const res = await client.DescribeAIConversation({
-              SdkAppId: args.sdkAppId,
-              TaskId: task.taskId
-            });
-            if (res.Status === 'InProgress') {
-              return res;
-            }
-          } catch (e) {
-            console.error(e);
-          }
-        }
-
         return client.StartAITranscription(
           Object.assign({}, args, {
             RoomIdType: 1,
@@ -160,17 +168,18 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const stopAITranscription = async ({ id, roomId }) => {
+  const stopAITranscription = async ({ id, roomId, options }) => {
     return stopTask({
       id,
       roomId,
-      callback: (client, { TaskId }) => {
-        return client.StopAITranscription(Object.assign({}, { TaskId }));
+      options,
+      callback: (client, args) => {
+        return client.StopAITranscription(Object.assign({}, args));
       }
     });
   };
 
-  const startRecord = async ({ roomId, options: targetOptions, recordParams, storageParams }) => {
+  const startRecord = async ({ roomId, options: targetOptions, recordParams, storageParams, roomIdType }) => {
     return startTask({
       type: 'record',
       roomId,
@@ -178,32 +187,41 @@ module.exports = fp(async (fastify, options) => {
       callback: (client, args) => {
         return client.CreateCloudRecording(
           Object.assign({}, args, {
-            RoomIdType: 0,
+            RoomIdType: roomIdType ?? targetOptions?.roomIdType ?? options.roomIdType ?? 0,
             StorageParams: {
-              CloudStorage: Object.assign({}, {
-                Region: options.cos.region,
-                Bucket: options.cos.bucket,
-                AccessKey: options.cos.accessKeyId,
-                SecretKey: options.cos.accessKeySecret,
-                Vendor: 0
-              }, storageParams)
+              CloudStorage: Object.assign(
+                {},
+                {
+                  Region: options.cos.region,
+                  Bucket: options.cos.bucket,
+                  AccessKey: options.cos.accessKeyId,
+                  SecretKey: options.cos.accessKeySecret,
+                  Vendor: 0
+                },
+                storageParams
+              )
             },
-            RecordParams: Object.assign({}, {
-              RecordMode: 1,
-              MaxIdleTime: 30,
-              StreamType: 0,
-              OutputFormat: 3
-            }, recordParams)
+            RecordParams: Object.assign(
+              {},
+              {
+                RecordMode: 1,
+                MaxIdleTime: 30,
+                StreamType: 0,
+                OutputFormat: 3
+              },
+              recordParams
+            )
           })
         );
       }
     });
   };
 
-  const stopRecord = async ({ id, roomId }) => {
+  const stopRecord = async ({ id, roomId, options }) => {
     return stopTask({
       id,
       roomId,
+      options,
       callback: (client, args) => {
         return client.DeleteCloudRecording(Object.assign({}, args));
       }
@@ -284,7 +302,7 @@ module.exports = fp(async (fastify, options) => {
 
   const dismiss = async ({ roomId, options }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
-    const client = getTrtcClient();
+    const client = getTrtcClient(options);
     // 调用TRTC服务端API结束会议
     const { appId } = getTrtcParams(options);
     await client.DismissRoomByStrRoomId({
@@ -304,10 +322,10 @@ module.exports = fp(async (fastify, options) => {
         .filter(({ stopTime }) => !stopTime)
         .map(({ id, type }) => {
           if (type === 'record') {
-            return stopRecord({ id, roomId });
+            return stopRecord({ id, roomId, options });
           }
           if (type === 'ai_transcription') {
-            return stopAITranscription({ id, roomId });
+            return stopAITranscription({ id, roomId, options });
           }
         })
     );
@@ -315,7 +333,7 @@ module.exports = fp(async (fastify, options) => {
 
   const removeMember = async ({ userId, roomId, options }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
-    const client = getTrtcClient();
+    const client = getTrtcClient(options);
     const { appId } = getTrtcParams(options);
     await client.RemoveUserByStrRoomId({
       SdkAppId: appId,

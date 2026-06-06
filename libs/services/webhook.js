@@ -10,7 +10,12 @@ module.exports = fp(async (fastify, options) => {
       return true;
     }
     const computedSign = crypto.createHmac('sha256', options.callbackKey).update(body).digest('base64');
-    return computedSign === sign;
+    if (!sign) {
+      return false;
+    }
+    const computedSignBuffer = Buffer.from(computedSign);
+    const signBuffer = Buffer.from(sign);
+    return computedSignBuffer.length === signBuffer.length && crypto.timingSafeEqual(computedSignBuffer, signBuffer);
   };
 
   // 根据 roomId 查找 instanceCase 并记录事件
@@ -247,13 +252,16 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const currentResult = task.result || { rounds: [] };
-    const rounds = [...currentResult.rounds, {
-      userId: UserId,
-      text: Text,
-      startTime: new Date(StartTimeMs),
-      endTime: new Date(EndTimeMs),
-      roundId: RoundId
-    }];
+    const rounds = [
+      ...currentResult.rounds,
+      {
+        userId: UserId,
+        text: Text,
+        startTime: new Date(StartTimeMs),
+        endTime: new Date(EndTimeMs),
+        roundId: RoundId
+      }
+    ];
 
     await task.update({
       stopRequestId: RoundId,
