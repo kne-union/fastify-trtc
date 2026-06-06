@@ -1,13 +1,11 @@
 const fp = require('fastify-plugin');
 const TLSSigAPIv2 = require('tls-sig-api-v2');
 const tencentcloud = require('tencentcloud-sdk-nodejs-trtc');
-const crypto = require('node:crypto');
 
 const TrtcClient = tencentcloud.trtc.v20190722.Client;
 
 module.exports = fp(async (fastify, options) => {
   const { models, services } = fastify[options.name];
-  const { Op } = fastify.sequelize.Sequelize;
 
   const getTrtcParams = props => {
     const params = Object.assign({}, options, props);
@@ -17,9 +15,18 @@ module.exports = fp(async (fastify, options) => {
     return params;
   };
 
+  let tlsSigApi;
+  const getTlsSigApi = () => {
+    const { appId, appSecret } = getTrtcParams();
+    if (!tlsSigApi || tlsSigApi.appId !== appId || tlsSigApi.appSecret !== appSecret) {
+      tlsSigApi = { appId, appSecret, api: new TLSSigAPIv2.Api(appId, appSecret) };
+    }
+    return tlsSigApi.api;
+  };
+
   const getUserSig = (userId, props) => {
     const { appId, appSecret, expire } = getTrtcParams(props);
-    const api = new TLSSigAPIv2.Api(appId, appSecret);
+    const api = getTlsSigApi();
     const userSig = api.genUserSig(userId, expire || 60 * 10);
     return {
       sdkAppId: appId,
@@ -163,7 +170,7 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const startRecord = async ({ roomId, options: targetOptions }) => {
+  const startRecord = async ({ roomId, options: targetOptions, recordParams, storageParams }) => {
     return startTask({
       type: 'record',
       roomId,
@@ -173,20 +180,20 @@ module.exports = fp(async (fastify, options) => {
           Object.assign({}, args, {
             RoomIdType: 0,
             StorageParams: {
-              CloudStorage: {
+              CloudStorage: Object.assign({}, {
                 Region: options.cos.region,
                 Bucket: options.cos.bucket,
                 AccessKey: options.cos.accessKeyId,
                 SecretKey: options.cos.accessKeySecret,
                 Vendor: 0
-              }
+              }, storageParams)
             },
-            RecordParams: {
+            RecordParams: Object.assign({}, {
               RecordMode: 1,
               MaxIdleTime: 30,
               StreamType: 0,
               OutputFormat: 3
-            }
+            }, recordParams)
           })
         );
       }
@@ -239,7 +246,7 @@ module.exports = fp(async (fastify, options) => {
         joinTime: new Date()
       });
     } else {
-      instanceCase.update({
+      await instanceCase.update({
         userList: Object.assign({}, instanceCase.userList, {
           [userId]: Object.assign({}, instanceCase.userList[userId], {
             userSig,
@@ -255,7 +262,7 @@ module.exports = fp(async (fastify, options) => {
       id: instanceCase.id,
       roomId,
       options,
-      joinTime: instanceCase.userList[userId]?.joinTime
+      startTime: instanceCase.userList[userId]?.startTime
     };
   };
 
@@ -289,10 +296,12 @@ module.exports = fp(async (fastify, options) => {
       endTime: new Date()
     });
 
-    const taskList = await models.task.findAll({ roomId });
+    const taskList = await models.task.findAll({
+      where: { trtcInstanceCaseId: instanceCase.id }
+    });
     await Promise.allSettled(
       taskList
-        .filter(({ stopTime }) => !!stopTime)
+        .filter(({ stopTime }) => !stopTime)
         .map(({ id, type }) => {
           if (type === 'record') {
             return stopRecord({ id, roomId });

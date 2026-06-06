@@ -39,15 +39,18 @@ module.exports = ({ DataTypes, options }) => {
     },
     associate: ({ task, instanceCase }) => {
       task.belongsTo(instanceCase, {
-        allowNull: null
+        allowNull: false
       });
     },
     options: {
       comment: 'TRTC任务',
       indexes: [
         {
-          fields: ['task_id', 'deleted_at'],
-          unique: true
+          fields: ['task_id'],
+          unique: true,
+          where: {
+            deleted_at: null
+          }
         }
       ]
     }

@@ -2,12 +2,17 @@ const fp = require('fastify-plugin');
 const COS = require('cos-nodejs-sdk-v5');
 
 module.exports = fp(async (fastify, options) => {
+  let cosClient;
   const createClient = () => {
-    return new COS({
+    if (cosClient) {
+      return cosClient;
+    }
+    cosClient = new COS({
       SecretId: options.cos.accessKeyId,
       SecretKey: options.cos.accessKeySecret,
       Region: options.cos.region
     });
+    return cosClient;
   };
 
   const getFileIdsByPathName = async ({ pathname }) => {
@@ -17,6 +22,9 @@ module.exports = fp(async (fastify, options) => {
       Region: options.cos.region,
       Prefix: `${pathname}/`
     });
+    if (!Contents || Contents.length === 0) {
+      return [];
+    }
     return await Promise.all(
       Contents.map(async item => {
         const url = cos.getObjectUrl({
@@ -37,9 +45,12 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const getFileIdsByFileKey = async ({ keys }) => {
+    if (!keys || keys.length === 0) {
+      return [];
+    }
+    const cos = createClient();
     return await Promise.all(
       keys.map(async fileKey => {
-        const cos = createClient();
         const url = cos.getObjectUrl({
           Bucket: options.cos.bucket,
           Region: options.cos.region,

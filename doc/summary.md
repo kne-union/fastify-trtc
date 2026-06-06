@@ -1,72 +1,118 @@
 ### 项目概述
 
-`@kne/fastify-trtc` 是一个 Fastify 插件，用于集成腾讯云实时音视频（TRTC）服务。该插件提供了一套完整的 API，用于管理 TRTC 房间、用户、任务和事件，简化了 TRTC 服务的使用流程。
+`@kne/fastify-trtc` 是一个 Fastify 插件，封装腾讯云实时音视频（TRTC）服务端 API，提供房间管理、云端录制、AI 转写、事件回调等完整能力。插件通过 `@kne/fastify-namespace` 组织模块，集成 `@kne/fastify-sequelize` 做数据持久化，自动记录房间实例、任务和事件。
 
-### 主要功能
+### 核心架构与流程
 
-- **用户管理**：生成用户签名（UserSig），用于 TRTC 身份验证
-- **房间管理**：创建、加入、退出和解散房间，以及移除房间成员
-- **任务管理**：
-  - 录制任务：开始和停止房间录制
-  - AI 转写任务：开始和停止语音转文字服务
-- **实例案例管理**：查询和记录 TRTC 使用实例的详细信息
-- **事件处理**：处理和记录 TRTC 服务产生的事件
+```
+客户端/TRTC回调
+       │
+       ↓
+  Controllers (路由层)
+       │
+       ↓
+  Services (业务层)
+   ┌───┼───────────┬──────────────┐
+   │   │           │              │
+  main  cos    webhook    instance-event  task
+   │   │           │              │        │
+   ↓   ↓           ↓              ↓        ↓
+ TRTC  COS     事件分发        事件查询   任务查询
+ SDK   SDK     +持久化
+                    │
+                    ↓
+               Models (数据层)
+          ┌─────┼─────────┐
+     instanceCase  task  instanceEvent
+```
 
-### 技术依赖
+| 层级 | 职责 |
+|------|------|
+| Controllers | 处理 HTTP 请求、参数校验、认证、调用 Service |
+| Services | 核心业务逻辑：TRTC API 调用、事件处理、数据查询 |
+| Models | Sequelize 数据模型定义与关联关系 |
 
-- **核心依赖**：
-  - `tencentcloud-sdk-nodejs-trtc`：腾讯云 TRTC SDK
-  - `tls-sig-api-v2`：腾讯云签名生成工具
-  - `uuid`：生成唯一标识符
+### 核心概念详解
 
-- **Fastify 生态**：
-  - `fastify-plugin`：Fastify 插件系统
-  - `@kne/fastify-namespace`：模块命名空间管理
-  - `@kne/fastify-sequelize`：Sequelize ORM 集成
+#### 房间生命周期
 
-### 数据模型
+```
+join(加入) → [startRecord/startAITranscription](启动任务) → [stopRecord/stopAITranscription](停止任务)
+       ↓                                                          ↓
+  创建 instanceCase                                       更新 task.stopTime
+       ↓
+  dismiss(解散) / exit(退出)
+       ↓
+  更新 instanceCase.endTime + 停止所有未完成任务
+```
 
-#### 实例案例模型 (Instance Case)
+- **join**：用户加入房间，若房间不存在则自动创建 `instanceCase`
+- **exit**：用户主动退出，更新 `userList` 中对应用户的 `exitTime`
+- **dismiss**：解散房间，调用 TRTC API 踢出所有用户，并自动停止所有未完成的录制/转写任务
+- **removeMember**：将指定用户从房间移除
 
-记录 TRTC 使用实例的详细信息：
+#### 事件回调机制
 
-- 房间 ID
-- 参与用户列表
-- 开始和结束时间
-- 扩展信息
+TRTC 服务端在房间事件、媒体事件、录制事件等发生时，向配置的回调地址推送事件。插件接收后：
 
-#### 实例事件模型 (Instance Event)
+1. **签名校验**：使用 `callbackKey` 进行 HMAC-SHA256 验证
+2. **事件分发**：按 `EventGroupId` 路由到对应处理器
+3. **持久化**：所有事件记录到 `instanceEvent` 表，部分事件触发业务逻辑更新
 
-记录从 TRTC 服务获取的事件：
+| EventGroupId | 事件组 | 处理逻辑 |
+|-------------|--------|---------|
+| 1 | 房间事件 | 记录事件 + 更新 instanceCase 状态 |
+| 2 | 媒体事件 | 记录事件 |
+| 3 | 云端录制事件 | 记录事件 + 更新 task 结果/状态 |
+| 8 | 页面录制事件 | 记录事件 |
+| - | AI 转写 (EventType=903) | 累积转写轮次到 task.result |
 
-- 事件名称
-- 关联的实例案例
+> **关键设计**：录制结束事件（310）会自动将 COS 文件通过 `fileManager` 转存并删除原文件，若 `fileManager` 不可用则直接存储原始文件列表。
 
-#### 任务模型 (Task)
+#### COS 文件转存
 
-记录与 TRTC 相关的任务：
+录制完成后，MP4 文件存储在腾讯云 COS。插件提供两种转存方式：
 
-- 任务类型（录制或 AI 转写）
-- 任务 ID
-- 开始和结束请求 ID
-- 任务结果
-- 开始和结束时间
-- 关联的实例案例
+- `getFileIdsByPathName`：按路径前缀批量获取并转存
+- `getFileIdsByFileKey`：按文件 Key 精确获取并转存
 
-### 使用场景
+转存后自动从 COS 删除原文件，避免存储冗余。
 
-- **在线教育**：虚拟课堂、在线辅导
-- **远程会议**：视频会议、语音会议
-- **在线医疗**：远程诊断、在线咨询
-- **社交互动**：语音聊天室、视频直播
-- **游戏应用**：实时语音、多人游戏
+### 主要特性
 
-### 插件架构
+- **UserSig 生成**：内置签名缓存，避免重复创建 `TLSSigAPIv2.Api` 实例
+- **TRTC Client 单例**：`TrtcClient` 和 `COS Client` 均为单例缓存
+- **录制参数可配置**：`startRecord` 支持通过 `recordParams`/`storageParams` 覆盖默认录制和存储配置
+- **任务自动停止**：`dismiss` 时自动停止所有未结束的录制/转写任务
+- **分页查询**：事件和任务列表均支持 `filter` + `perPage` + `currentPage` 分页
+- **软删除**：所有模型启用 `paranoid` 软删除
 
-该插件采用模块化设计，主要包含以下组件：
+### 使用方法
 
-- **控制器 (Controllers)**：处理 HTTP 请求和响应
-- **服务 (Services)**：实现业务逻辑和 TRTC API 调用
-- **模型 (Models)**：定义数据结构和数据库交互
+```js
+const fastify = require('fastify')();
 
-插件通过 Fastify 的依赖注入系统，将这些组件注册到应用程序中，并通过命名空间进行隔离和管理。
+// 注册依赖插件
+await fastify.register(require('@kne/fastify-sequelize'), sequelizeConfig);
+await fastify.register(require('@kne/fastify-account'), accountConfig);
+
+// 注册 TRTC 插件
+await fastify.register(require('@kne/fastify-trtc'), {
+  appId: 1400000000,
+  appSecret: 'your-app-secret',
+  cos: {
+    region: 'ap-guangzhou',
+    bucket: 'your-bucket-1250000000',
+    accessKeyId: 'your-secret-id',
+    accessKeySecret: 'your-secret-key'
+  },
+  callbackKey: 'your-callback-key'
+});
+
+// 使用 Service API
+const { services } = fastify.trtc;
+const result = await services.join({
+  roomId: 'room_001',
+  userId: 'user_001'
+});
+```
