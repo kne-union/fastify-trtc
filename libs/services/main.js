@@ -7,10 +7,33 @@ const TrtcClient = tencentcloud.trtc.v20190722.Client;
 module.exports = fp(async (fastify, options) => {
   const { models, services } = fastify[options.name];
 
+  const omitUndefined = target => {
+    return Object.fromEntries(Object.entries(target || {}).filter(([, value]) => value !== undefined));
+  };
+
+  const normalizeTrtcParams = params => {
+    if (params.appId !== undefined && params.appId !== '') {
+      params.appId = Number(params.appId);
+    }
+    const credential = Object.assign(
+      {},
+      omitUndefined(options.credential || options.tencentcloud?.credential),
+      omitUndefined(params.credential || params.tencentcloud?.credential),
+      omitUndefined(params.secretId || params.secretKey ? { secretId: params.secretId, secretKey: params.secretKey } : undefined)
+    );
+    if (Object.keys(credential).length > 0) {
+      params.credential = credential;
+    } else {
+      delete params.credential;
+    }
+    return params;
+  };
+
   const getTrtcParams = props => {
-    const params = Object.assign({}, options, props);
+    const currentProps = omitUndefined(props);
+    const params = normalizeTrtcParams(Object.assign({}, options, currentProps));
     if (typeof options.getParams === 'function') {
-      return options.getParams(params);
+      return normalizeTrtcParams(Object.assign({}, params, omitUndefined(options.getParams(params))));
     }
     return params;
   };
@@ -26,6 +49,9 @@ module.exports = fp(async (fastify, options) => {
 
   const getUserSig = (userId, props) => {
     const { appId, appSecret, expire } = getTrtcParams(props);
+    if (!Number.isFinite(appId) || !appSecret) {
+      throw new Error('TRTC appId and appSecret are required');
+    }
     const api = getTlsSigApi(props);
     const userSig = api.genUserSig(userId, expire || 60 * 10);
     return {
@@ -39,6 +65,9 @@ module.exports = fp(async (fastify, options) => {
 
   const getTrtcClient = props => {
     const params = getTrtcParams(props);
+    if (!params.credential?.secretId || !params.credential?.secretKey) {
+      throw new Error('TRTC credential.secretId and credential.secretKey are required');
+    }
     const cacheKey = JSON.stringify({
       credential: params.credential,
       region: params.region,
@@ -50,6 +79,228 @@ module.exports = fp(async (fastify, options) => {
     const trtcClient = new TrtcClient(params);
     trtcClientMap.set(cacheKey, trtcClient);
     return trtcClient;
+  };
+
+  const getEventTime = event => {
+    return new Date(event.time || event.payload?.eventMsTs || event.payload?.time || event.payload?.event?.Time).getTime();
+  };
+
+  const getRoomInfo = async ({ instanceCase, client, appId }) => {
+    const endTime = Math.floor(new Date(instanceCase.endTime || new Date()).getTime() / 1000);
+    const startTime = Math.max(0, endTime - 24 * 60 * 60 + 1);
+    const { RoomList = [] } = await client.DescribeRoomInfo({
+      SdkAppId: appId,
+      StartTime: startTime,
+      EndTime: endTime,
+      RoomId: String(instanceCase.roomId)
+    });
+    return RoomList.find(item => String(item.RoomString || item.RoomId || '') === String(instanceCase.roomId)) || RoomList[0];
+  };
+
+  const isDescribeRoomInfoTimeLimitError = error => {
+    return ['InvalidParameter.StartTimeOversize', 'InvalidParameter.QueryScaleOversize'].includes(error?.code);
+  };
+
+  const eventRecordExists = (existingEvents, predicate) => {
+    return existingEvents.some(event => predicate(event.payload || {}, event));
+  };
+
+  const createEventRecord = async ({ existingEvents, code, time, payload, trtcInstanceCaseId }) => {
+    const record = await models.instanceEvent.create({
+      code,
+      time,
+      payload,
+      trtcInstanceCaseId
+    });
+    existingEvents.push(record);
+    return record;
+  };
+
+  const syncCallDetailInfo = async ({ instanceCase, client, appId, commId, startTime, endTime, existingEvents }) => {
+    const createdEvents = [];
+    const users = new Map();
+    const pageSize = 100;
+    for (let currentStartTime = startTime; currentStartTime <= endTime; currentStartTime += 4 * 60 * 60) {
+      const currentEndTime = Math.min(endTime, currentStartTime + 4 * 60 * 60 - 1);
+      for (let pageNumber = 0; ; pageNumber += 1) {
+        const { UserList = [] } = await client.DescribeCallDetailInfo({
+          SdkAppId: appId,
+          CommId: commId,
+          StartTime: currentStartTime,
+          EndTime: currentEndTime,
+          PageNumber: pageNumber,
+          PageSize: pageSize
+        });
+        for (const user of UserList || []) {
+          const userId = user.UserId;
+          if (!userId) {
+            continue;
+          }
+          users.set(String(userId), user);
+          if (eventRecordExists(existingEvents, payload => payload.source === 'DescribeCallDetailInfo' && payload.recordType === 'user' && String(payload.userId) === String(userId) && payload.joinTs === user.JoinTs && payload.leaveTs === user.LeaveTs)) {
+            continue;
+          }
+          const record = await createEventRecord({
+            existingEvents,
+            code: 'DescribeCallDetailInfo.User',
+            time: new Date(((user.JoinTs || user.LeaveTs || currentStartTime) * 1000)),
+            payload: {
+              source: 'DescribeCallDetailInfo',
+              recordType: 'user',
+              roomId: instanceCase.roomId,
+              commId,
+              userId,
+              joinTs: user.JoinTs,
+              leaveTs: user.LeaveTs,
+              user
+            },
+            trtcInstanceCaseId: instanceCase.id
+          });
+          createdEvents.push(record);
+        }
+        if (!UserList || UserList.length < pageSize) {
+          break;
+        }
+      }
+    }
+
+    if (users.size > 0) {
+      const userList = Object.assign({}, instanceCase.userList);
+      users.forEach((user, userId) => {
+        userList[userId] = Object.assign({}, userList[userId], {
+          startTime: user.JoinTs ? new Date(user.JoinTs * 1000) : userList[userId]?.startTime,
+          exitTime: user.LeaveTs ? new Date(user.LeaveTs * 1000) : userList[userId]?.exitTime,
+          status: user.Finished ? 1 : userList[userId]?.status,
+          metrics: user
+        });
+      });
+      await instanceCase.update({ userList });
+    }
+
+    const userIds = Array.from(users.keys());
+    const userGroups = userIds.length > 0 ? Array.from({ length: Math.ceil(userIds.length / 6) }, (_, index) => userIds.slice(index * 6, index * 6 + 6)) : [undefined];
+    for (let currentStartTime = startTime; currentStartTime <= endTime; currentStartTime += 60 * 60) {
+      const currentEndTime = Math.min(endTime, currentStartTime + 60 * 60 - 1);
+      for (const userGroup of userGroups) {
+        const { Data = [] } = await client.DescribeCallDetailInfo({
+          SdkAppId: appId,
+          CommId: commId,
+          StartTime: currentStartTime,
+          EndTime: currentEndTime,
+          DataType: ['all'],
+          PageNumber: 0,
+          PageSize: userGroup ? userGroup.length : 6,
+          ...(userGroup ? { UserIds: userGroup } : {})
+        });
+        for (const item of Data || []) {
+          if (eventRecordExists(existingEvents, payload => payload.source === 'DescribeCallDetailInfo' && payload.recordType === 'metric' && String(payload.userId || '') === String(item.UserId || '') && String(payload.peerId || '') === String(item.PeerId || '') && payload.dataType === item.DataType && payload.startTime === currentStartTime && payload.endTime === currentEndTime)) {
+            continue;
+          }
+          const record = await createEventRecord({
+            existingEvents,
+            code: 'DescribeCallDetailInfo.Metric',
+            time: new Date(currentStartTime * 1000),
+            payload: {
+              source: 'DescribeCallDetailInfo',
+              recordType: 'metric',
+              roomId: instanceCase.roomId,
+              commId,
+              userId: item.UserId,
+              peerId: item.PeerId,
+              dataType: item.DataType,
+              startTime: currentStartTime,
+              endTime: currentEndTime,
+              data: item
+            },
+            trtcInstanceCaseId: instanceCase.id
+          });
+          createdEvents.push(record);
+        }
+      }
+    }
+    return createdEvents;
+  };
+
+  const syncRoomUserEvents = async ({ instanceCase, options: targetOptions }) => {
+    if (!(targetOptions?.enableRestApiQuery ?? options.enableRestApiQuery)) {
+      return [];
+    }
+    if (!instanceCase.startTime) {
+      return [];
+    }
+    const { appId } = getTrtcParams(targetOptions);
+    const client = getTrtcClient(targetOptions);
+    let roomInfo;
+    try {
+      roomInfo = await getRoomInfo({ instanceCase, client, appId });
+    } catch (e) {
+      if (isDescribeRoomInfoTimeLimitError(e)) {
+        console.warn(`Skip syncing TRTC room user events because room info query time is out of range: ${instanceCase.roomId}`);
+        return [];
+      }
+      throw e;
+    }
+    if (!roomInfo?.CommId) {
+      return [];
+    }
+    const startTime = roomInfo.CreateTime || Math.floor(new Date(instanceCase.startTime).getTime() / 1000);
+    const endTime = roomInfo.DestroyTime || Math.floor(new Date(instanceCase.endTime || new Date()).getTime() / 1000);
+    const commId = roomInfo.CommId;
+    if (roomInfo?.CreateTime && new Date(instanceCase.startTime).getTime() !== roomInfo.CreateTime * 1000) {
+      await instanceCase.update({
+        startTime: new Date(roomInfo.CreateTime * 1000)
+      });
+    }
+    const existingEvents = await models.instanceEvent.findAll({
+      where: {
+        trtcInstanceCaseId: instanceCase.id
+      }
+    });
+    const eventExists = ({ userId, time, eventId }) => {
+      return eventRecordExists(existingEvents, (payload, event) => {
+        return (
+          String(payload.userId || payload.peerId || '') === String(userId) &&
+          getEventTime(event) === Number(time) &&
+          (String(event.code) === String(eventId) || payload.eventId === eventId || payload.eventType)
+        );
+      });
+    };
+    const createdEvents = [];
+    const { Data = [] } = await client.DescribeUserEvent({
+      SdkAppId: appId,
+      CommId: commId,
+      StartTime: startTime,
+      EndTime: endTime
+    });
+    for (const item of Data) {
+      const peerId = item.PeerId || item.UserId;
+      for (const event of item.Content || []) {
+        if (eventExists({ userId: peerId, time: event.Time, eventId: event.EventId })) {
+          continue;
+        }
+        const record = await createEventRecord({
+          existingEvents,
+          code: String(event.EventId),
+          time: new Date(event.Time),
+          payload: {
+            source: 'DescribeUserEvent',
+            roomId: instanceCase.roomId,
+            userId: peerId,
+            peerId,
+            commId,
+            eventId: event.EventId,
+            type: event.Type,
+            paramOne: event.ParamOne,
+            paramTwo: event.ParamTwo,
+            event
+          },
+          trtcInstanceCaseId: instanceCase.id
+        });
+        createdEvents.push(record);
+      }
+    }
+    createdEvents.push(...(await syncCallDetailInfo({ instanceCase, client, appId, commId, startTime, endTime, existingEvents })));
+    return createdEvents;
   };
 
   const instanceCaseDetail = async ({ roomId, id }) => {
@@ -189,28 +440,20 @@ module.exports = fp(async (fastify, options) => {
           Object.assign({}, args, {
             RoomIdType: roomIdType ?? targetOptions?.roomIdType ?? options.roomIdType ?? 0,
             StorageParams: {
-              CloudStorage: Object.assign(
-                {},
-                {
-                  Region: options.cos.region,
-                  Bucket: options.cos.bucket,
-                  AccessKey: options.cos.accessKeyId,
-                  SecretKey: options.cos.accessKeySecret,
-                  Vendor: 0
-                },
-                storageParams
-              )
+              CloudStorage: Object.assign({}, {
+                Region: options.cos.region,
+                Bucket: options.cos.bucket,
+                AccessKey: options.cos.accessKeyId,
+                SecretKey: options.cos.accessKeySecret,
+                Vendor: 0
+              }, storageParams)
             },
-            RecordParams: Object.assign(
-              {},
-              {
-                RecordMode: 1,
-                MaxIdleTime: 30,
-                StreamType: 0,
-                OutputFormat: 3
-              },
-              recordParams
-            )
+            RecordParams: Object.assign({}, {
+              RecordMode: 1,
+              MaxIdleTime: 30,
+              StreamType: 0,
+              OutputFormat: 3
+            }, recordParams)
           })
         );
       }
@@ -245,6 +488,7 @@ module.exports = fp(async (fastify, options) => {
 
   const join = async ({ roomId, userId, options }) => {
     const userSig = getUserSig(userId, options);
+    const startTime = new Date();
     let instanceCase = await models.instanceCase.findOne({
       where: {
         roomId
@@ -255,18 +499,19 @@ module.exports = fp(async (fastify, options) => {
         roomId,
         userList: {
           [userId]: {
-            startTime: new Date(),
+            startTime,
             userSig,
             status: 0,
             options
           }
         },
-        joinTime: new Date()
+        startTime
       });
     } else {
       await instanceCase.update({
         userList: Object.assign({}, instanceCase.userList, {
           [userId]: Object.assign({}, instanceCase.userList[userId], {
+            startTime,
             userSig,
             status: 0,
             options
@@ -280,7 +525,7 @@ module.exports = fp(async (fastify, options) => {
       id: instanceCase.id,
       roomId,
       options,
-      startTime: instanceCase.userList[userId]?.startTime
+      startTime
     };
   };
 
@@ -313,6 +558,11 @@ module.exports = fp(async (fastify, options) => {
     await instanceCase.update({
       endTime: new Date()
     });
+    try {
+      await syncRoomUserEvents({ instanceCase, options });
+    } catch (e) {
+      console.error('Failed to sync TRTC room user events:', e);
+    }
 
     const taskList = await models.task.findAll({
       where: { trtcInstanceCaseId: instanceCase.id }
@@ -351,6 +601,7 @@ module.exports = fp(async (fastify, options) => {
     exit,
     dismiss,
     removeMember,
-    checkRecord
+    checkRecord,
+    syncRoomUserEvents
   });
 });

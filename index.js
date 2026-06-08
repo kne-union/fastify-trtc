@@ -16,7 +16,9 @@ module.exports = fp(async (fastify, options) => {
         default:
           return [authenticate.user, authenticate.admin];
       }
-    }, cos: {
+    },
+    enableRestApiQuery: false,
+    cos: {
       region: '', bucket: '', accessKeyId: '', accessKeySecret: ''
     }
   }, options);

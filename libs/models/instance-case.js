@@ -6,7 +6,7 @@ module.exports = ({ DataTypes, options }) => {
       }, userList: {
         type: DataTypes.JSON, comment: '参与用户', defaultValue: {}
       }, startTime: {
-        type: DataTypes.DATE, comment: '开始时间(第一个人实际进入会议时间)'
+        type: DataTypes.DATE, comment: '第一个人实际加入房间时间'
       }, endTime: {
         type: DataTypes.DATE, comment: '实际结束时间，用户自己结束会议或者通过事件分析房间所有人都下线'
       }, options: {
