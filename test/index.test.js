@@ -4,6 +4,9 @@ const crypto = require('node:crypto');
 const mockTrtcCalls = [];
 class MockTrtcClient {
   constructor(options) {
+    if (!options.credential?.secretId || !options.credential?.secretKey) {
+      throw new Error('mock trtc client missing credential');
+    }
     mockTrtcCalls.push({ method: 'constructor', params: options });
   }
 
@@ -35,6 +38,70 @@ class MockTrtcClient {
   async DismissRoomByStrRoomId(params) {
     mockTrtcCalls.push({ method: 'DismissRoomByStrRoomId', params });
     return { RequestId: `dismiss-${mockTrtcCalls.length}` };
+  }
+
+  async DescribeUserEvent(params) {
+    mockTrtcCalls.push({ method: 'DescribeUserEvent', params });
+    return {
+      Data: [
+        {
+          PeerId: 'user_001',
+          Content: [{ Type: 0, Time: 1700000000000, EventId: 32768, ParamOne: -1, ParamTwo: -1 }]
+        }
+      ]
+    };
+  }
+
+  async DescribeRoomInfo(params) {
+    mockTrtcCalls.push({ method: 'DescribeRoomInfo', params });
+    if (params.RoomId === 'room_dismiss_time_limit_001') {
+      const error = new Error('查询起始时间超过当前监控仪表盘功能版本限制');
+      error.code = 'InvalidParameter.StartTimeOversize';
+      throw error;
+    }
+    return {
+      RoomList: [
+        {
+          CommId: `${params.SdkAppId}_${params.RoomId}_1700000000`,
+          RoomString: params.RoomId,
+          CreateTime: 1700000000,
+          DestroyTime: 1700003600,
+          IsFinished: true,
+          UserId: 'user_001'
+        }
+      ]
+    };
+  }
+
+  async DescribeCallDetailInfo(params) {
+    mockTrtcCalls.push({ method: 'DescribeCallDetailInfo', params });
+    if (params.DataType) {
+      return {
+        Data: [
+          {
+            UserId: 'user_001',
+            PeerId: '',
+            DataType: 'bigvCapFps',
+            Content: [{ Time: params.StartTime + 1, Value: 30 }]
+          }
+        ]
+      };
+    }
+    return {
+      Total: 1,
+      UserList: [
+        {
+          RoomStr: params.CommId.split('_')[1],
+          UserId: 'user_001',
+          JoinTs: 1700000000,
+          LeaveTs: 1700000300,
+          Finished: true,
+          DeviceType: 'web',
+          SdkVersion: '1.0.0',
+          ClientIp: '127.0.0.1'
+        }
+      ]
+    };
   }
 
   async RemoveUserByStrRoomId(params) {
@@ -117,30 +184,29 @@ describe('@kne/fastify-trtc', function () {
 
     // 注册 http-errors mock
     fastify.decorate('httpErrors', {
-      notFound: msg => {
+      notFound: (msg) => {
         const err = new Error(msg);
         err.statusCode = 404;
         return err;
       }
     });
 
-    await fastify.register(
-      require('../index'),
-      Object.assign(
-        {
-          appId: 1400000000,
-          appSecret: 'test-secret-key',
-          cos: {
-            region: 'ap-guangzhou',
-            bucket: 'test-bucket-1250000000',
-            accessKeyId: 'test-secret-id',
-            accessKeySecret: 'test-secret-key'
-          },
-          callbackKey: 'test-callback-key'
-        },
-        pluginOptions
-      )
-    );
+    await fastify.register(require('../index'), Object.assign({
+      appId: 1400000000,
+      appSecret: 'test-secret-key',
+      credential: {
+        secretId: 'test-secret-id',
+        secretKey: 'test-secret-key'
+      },
+      cos: {
+        region: 'ap-guangzhou',
+        bucket: 'test-bucket-1250000000',
+        accessKeyId: 'test-secret-id',
+        accessKeySecret: 'test-secret-key'
+      },
+      enableRestApiQuery: true,
+      callbackKey: 'test-callback-key'
+    }, pluginOptions));
 
     await fastify.ready();
     await fastify.sequelize.sync({ force: true });
@@ -222,13 +288,44 @@ describe('@kne/fastify-trtc', function () {
 
       expect(result.roomId).to.equal('room_001');
       expect(result.userSig).to.exist;
+      expect(result.userSig.sdkAppId).to.equal(1400000000);
       expect(result.id).to.exist;
 
       const instanceCase = await fastify.trtc.models.instanceCase.findOne({
         where: { roomId: 'room_001' }
       });
       expect(instanceCase).to.exist;
+      expect(instanceCase.startTime).to.exist;
+      expect(result.startTime).to.exist;
       expect(instanceCase.userList).to.have.property('user_001');
+      expect(instanceCase.userList.user_001.startTime).to.exist;
+    });
+
+    it('should return numeric sdkAppId when appId is configured as string', async () => {
+      await fastify.close();
+      fastify = await buildFastify({ appId: '1400000000' });
+
+      const result = await fastify.trtc.services.join({
+        roomId: 'room_string_app_id_001',
+        userId: 'user_001'
+      });
+
+      expect(result.userSig.sdkAppId).to.equal(1400000000);
+    });
+
+    it('should reject join when appId is missing', async () => {
+      await fastify.close();
+      fastify = await buildFastify({ appId: '' });
+
+      try {
+        await fastify.trtc.services.join({
+          roomId: 'room_missing_app_id_001',
+          userId: 'user_001'
+        });
+        expect.fail('should have thrown error');
+      } catch (e) {
+        expect(e.message).to.equal('TRTC appId and appSecret are required');
+      }
     });
 
     it('should update userList when joining existing room', async () => {
@@ -319,6 +416,8 @@ describe('@kne/fastify-trtc', function () {
       expect(task.startRequestId).to.match(/^record-start-/);
 
       const startCall = mockTrtcCalls.find(item => item.method === 'CreateCloudRecording');
+      const constructorCall = mockTrtcCalls.find(item => item.method === 'constructor');
+      expect(constructorCall.params.credential).to.deep.equal({ secretId: 'test-secret-id', secretKey: 'test-secret-key' });
       expect(startCall.params.RoomId).to.equal(roomId);
       expect(startCall.params.RoomIdType).to.equal(0);
       expect(startCall.params.StorageParams.CloudStorage.Bucket).to.equal('override-bucket');
@@ -332,6 +431,22 @@ describe('@kne/fastify-trtc', function () {
       const stopCallCount = mockTrtcCalls.filter(item => item.method === 'DeleteCloudRecording').length;
       await fastify.trtc.services.stopRecord({ id: task.id, roomId });
       expect(mockTrtcCalls.filter(item => item.method === 'DeleteCloudRecording').length).to.equal(stopCallCount);
+    });
+
+    it('should keep base credential when runtime task options contain undefined credential', async () => {
+      const roomId = 'room_record_runtime_options_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+
+      await fastify.trtc.services.startRecord({
+        roomId,
+        options: {
+          credential: undefined,
+          language: 'zh'
+        }
+      });
+
+      const constructorCall = mockTrtcCalls.find(item => item.method === 'constructor');
+      expect(constructorCall.params.credential).to.deep.equal({ secretId: 'test-secret-id', secretKey: 'test-secret-key' });
     });
 
     it('should start and stop ai transcription task with language options', async () => {
@@ -395,7 +510,60 @@ describe('@kne/fastify-trtc', function () {
       expect(instanceCase.endTime).to.exist;
       expect(task.stopTime).to.exist;
       expect(mockTrtcCalls.some(item => item.method === 'DismissRoomByStrRoomId')).to.be.true;
+      expect(mockTrtcCalls.some(item => item.method === 'DescribeRoomInfo' && item.params.RoomId === roomId)).to.be.true;
+      expect(
+        mockTrtcCalls.some(
+          item => item.method === 'DescribeUserEvent' && !Object.hasOwn(item.params, 'RoomId') && !Object.hasOwn(item.params, 'UserId') && item.params.CommId === `1400000000_${roomId}_1700000000` && item.params.StartTime === 1700000000
+        )
+      ).to.be.true;
       expect(mockTrtcCalls.some(item => item.method === 'DeleteCloudRecording')).to.be.true;
+      const events = await fastify.trtc.models.instanceEvent.findAll({ where: { trtcInstanceCaseId: instanceCase.id, code: '32768' } });
+      expect(events).to.have.length(1);
+      expect(events[0].payload.source).to.equal('DescribeUserEvent');
+      expect(mockTrtcCalls.some(item => item.method === 'DescribeCallDetailInfo' && !item.params.DataType)).to.be.true;
+      expect(mockTrtcCalls.some(item => item.method === 'DescribeCallDetailInfo' && item.params.DataType?.[0] === 'all')).to.be.true;
+      const callDetailUsers = await fastify.trtc.models.instanceEvent.findAll({ where: { trtcInstanceCaseId: instanceCase.id, code: 'DescribeCallDetailInfo.User' } });
+      const callDetailMetrics = await fastify.trtc.models.instanceEvent.findAll({ where: { trtcInstanceCaseId: instanceCase.id, code: 'DescribeCallDetailInfo.Metric' } });
+      expect(callDetailUsers).to.have.length(1);
+      expect(callDetailUsers[0].payload.user.joinTs || callDetailUsers[0].payload.joinTs).to.exist;
+      expect(callDetailMetrics.length).to.be.greaterThan(0);
+      expect(callDetailMetrics.some(item => item.payload.data.DataType === 'bigvCapFps')).to.be.true;
+      await instanceCase.reload();
+      expect(instanceCase.startTime.getTime()).to.equal(1700000000 * 1000);
+      expect(new Date(instanceCase.userList.user_001.startTime).getTime()).to.equal(1700000000 * 1000);
+      expect(new Date(instanceCase.userList.user_001.exitTime).getTime()).to.equal(1700000300 * 1000);
+    });
+
+    it('should skip room event sync when DescribeRoomInfo time range is out of dashboard limit', async () => {
+      const roomId = 'room_dismiss_time_limit_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+
+      await fastify.trtc.services.dismiss({ roomId });
+
+      const instanceCase = await fastify.trtc.models.instanceCase.findOne({ where: { roomId } });
+      const events = await fastify.trtc.models.instanceEvent.findAll({ where: { trtcInstanceCaseId: instanceCase.id } });
+      expect(instanceCase.endTime).to.exist;
+      expect(events).to.have.length(0);
+      expect(mockTrtcCalls.some(item => item.method === 'DescribeRoomInfo' && item.params.RoomId === roomId)).to.be.true;
+      expect(mockTrtcCalls.some(item => item.method === 'DescribeUserEvent' && item.params.CommId === `1400000000_${roomId}_1700000000`)).to.be.false;
+    });
+
+    it('should skip described room event when webhook already saved it', async () => {
+      const roomId = 'room_dismiss_dedup_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+      const instanceCase = await fastify.trtc.models.instanceCase.findOne({ where: { roomId } });
+      await fastify.trtc.models.instanceEvent.create({
+        code: '103',
+        time: new Date(1700000000000),
+        payload: { eventGroupId: 1, eventType: 103, roomId, userId: 'user_001', eventMsTs: 1700000000000 },
+        trtcInstanceCaseId: instanceCase.id
+      });
+
+      await fastify.trtc.services.dismiss({ roomId });
+
+      const events = await fastify.trtc.models.instanceEvent.findAll({ where: { trtcInstanceCaseId: instanceCase.id, code: '103' } });
+      expect(events).to.have.length(1);
+      expect(events[0].code).to.equal('103');
     });
 
     it('should remove member through mocked TRTC client', async () => {
@@ -529,7 +697,7 @@ describe('@kne/fastify-trtc', function () {
       const instanceCase = await fastify.trtc.models.instanceCase.findOne({
         where: { roomId: 'room_event_003' }
       });
-      expect(instanceCase.userList.user_001.joinTime).to.exist;
+      expect(instanceCase.userList.user_001.startTime).to.exist;
       expect(instanceCase.userList.user_001.role).to.equal(0);
     });
 
@@ -811,14 +979,11 @@ describe('@kne/fastify-trtc', function () {
     });
 
     it('should filter events by code', async () => {
-      const result = await fastify.trtc.services.instanceEvent.list(
-        {},
-        {
-          filter: { code: '101' },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const result = await fastify.trtc.services.instanceEvent.list({}, {
+        filter: { code: '101' },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(result.totalCount).to.be.greaterThan(0);
       result.pageData.forEach(item => {
         expect(item.code).to.equal('101');
@@ -826,26 +991,20 @@ describe('@kne/fastify-trtc', function () {
     });
 
     it('should filter events by roomId', async () => {
-      const result = await fastify.trtc.services.instanceEvent.list(
-        {},
-        {
-          filter: { roomId: 'room_query_001' },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const result = await fastify.trtc.services.instanceEvent.list({}, {
+        filter: { roomId: 'room_query_001' },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(result.totalCount).to.be.greaterThan(0);
     });
 
     it('should return empty when roomId not found', async () => {
-      const result = await fastify.trtc.services.instanceEvent.list(
-        {},
-        {
-          filter: { roomId: 'non_existent_room' },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const result = await fastify.trtc.services.instanceEvent.list({}, {
+        filter: { roomId: 'non_existent_room' },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(result.totalCount).to.equal(0);
       expect(result.pageData.length).to.equal(0);
     });
@@ -886,14 +1045,11 @@ describe('@kne/fastify-trtc', function () {
     });
 
     it('should return empty when roomId not found', async () => {
-      const result = await fastify.trtc.services.task.list(
-        {},
-        {
-          filter: { roomId: 'non_existent_room' },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const result = await fastify.trtc.services.task.list({}, {
+        filter: { roomId: 'non_existent_room' },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(result.totalCount).to.equal(0);
       expect(result.pageData.length).to.equal(0);
     });
@@ -953,7 +1109,10 @@ describe('@kne/fastify-trtc', function () {
 
       expect(result).to.deep.equal(['file:video-001.mp4', 'file:video-002.mp4']);
       expect(mockCosCalls.find(item => item.method === 'getBucket').params.Prefix).to.equal('record-task/');
-      expect(mockCosCalls.filter(item => item.method === 'deleteObject').map(item => item.params.Key)).to.deep.equal(['record-task/video-001.mp4', 'record-task/video-002.mp4']);
+      expect(mockCosCalls.filter(item => item.method === 'deleteObject').map(item => item.params.Key)).to.deep.equal([
+        'record-task/video-001.mp4',
+        'record-task/video-002.mp4'
+      ]);
     });
 
     it('should return COS keys when fileManager is not registered', async () => {
@@ -1117,39 +1276,30 @@ describe('@kne/fastify-trtc', function () {
 
     it('should filter events by time range', async () => {
       const now = new Date();
-      const result = await fastify.trtc.services.instanceEvent.list(
-        {},
-        {
-          filter: {
-            startTime: now.toISOString(),
-            endTime: new Date(now.getTime() + 3600000).toISOString()
-          },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const result = await fastify.trtc.services.instanceEvent.list({}, {
+        filter: {
+          startTime: now.toISOString(),
+          endTime: new Date(now.getTime() + 3600000).toISOString()
+        },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(result).to.have.property('pageData');
     });
 
     it('should filter tasks by active status', async () => {
-      const activeResult = await fastify.trtc.services.task.list(
-        {},
-        {
-          filter: { active: true },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const activeResult = await fastify.trtc.services.task.list({}, {
+        filter: { active: true },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(activeResult).to.have.property('pageData');
 
-      const inactiveResult = await fastify.trtc.services.task.list(
-        {},
-        {
-          filter: { active: false },
-          perPage: 10,
-          currentPage: 1
-        }
-      );
+      const inactiveResult = await fastify.trtc.services.task.list({}, {
+        filter: { active: false },
+        perPage: 10,
+        currentPage: 1
+      });
       expect(inactiveResult).to.have.property('pageData');
     });
   });

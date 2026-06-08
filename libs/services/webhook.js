@@ -80,7 +80,7 @@ module.exports = fp(async (fastify, options) => {
             if (userList[EventInfo.UserId]) {
               userList[EventInfo.UserId] = Object.assign({}, userList[EventInfo.UserId], {
                 status: 0,
-                joinTime: new Date(EventInfo.EventMsTs),
+                startTime: new Date(EventInfo.EventMsTs),
                 role: EventInfo.Role,
                 terminalType: EventInfo.TerminalType,
                 userType: EventInfo.UserType
@@ -252,16 +252,13 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const currentResult = task.result || { rounds: [] };
-    const rounds = [
-      ...currentResult.rounds,
-      {
-        userId: UserId,
-        text: Text,
-        startTime: new Date(StartTimeMs),
-        endTime: new Date(EndTimeMs),
-        roundId: RoundId
-      }
-    ];
+    const rounds = [...currentResult.rounds, {
+      userId: UserId,
+      text: Text,
+      startTime: new Date(StartTimeMs),
+      endTime: new Date(EndTimeMs),
+      roundId: RoundId
+    }];
 
     await task.update({
       stopRequestId: RoundId,
