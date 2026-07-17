@@ -592,6 +592,71 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
+  const getRoomSnapshot = async ({ roomId }) => {
+    const instanceCase = await models.instanceCase.findOne({
+      where: { roomId: String(roomId) }
+    });
+    if (!instanceCase) {
+      return {
+        roomId: String(roomId),
+        members: [],
+        updatedAt: new Date().toISOString()
+      };
+    }
+    const events = await models.instanceEvent.findAll({
+      where: { trtcInstanceCaseId: instanceCase.id },
+      order: [['time', 'DESC']],
+      limit: 500
+    });
+    const latestEventsByUser = {};
+    events.forEach(event => {
+      const payload = event.payload || {};
+      if (payload.source !== 'ClientSDK') {
+        return;
+      }
+      const userId = String(payload.userId || payload.reporterId || '');
+      if (!userId) {
+        return;
+      }
+      const eventType = payload.eventType;
+      if (!latestEventsByUser[userId]) {
+        latestEventsByUser[userId] = {};
+      }
+      const time = new Date(event.time).getTime();
+      if (!latestEventsByUser[userId][eventType] || time > latestEventsByUser[userId][eventType].time) {
+        latestEventsByUser[userId][eventType] = {
+          time,
+          data: payload.event?.data || payload.event
+        };
+      }
+    });
+    const userList = instanceCase.userList || {};
+    const members = Object.entries(userList).map(([userId, userState]) => {
+      const userEvents = latestEventsByUser[String(userId)] || {};
+      const getEventTime = type => userEvents[type]?.time || 0;
+      return {
+        userId: String(userId),
+        status: userState.status,
+        startTime: userState.startTime || null,
+        exitTime: userState.exitTime || null,
+        online: userState.status === 0,
+        cameraOpen: getEventTime('camera-open') >= getEventTime('camera-close'),
+        microphoneOpen: getEventTime('microphone-open') >= getEventTime('microphone-close'),
+        networkQuality: userEvents['network-quality']?.data || null,
+        statistics: userEvents.statistics?.data || null,
+        deviceInfo: userEvents['device-info']?.data || null,
+        lastEventAt: Object.values(userEvents).reduce((max, item) => Math.max(max, item.time || 0), 0) || null
+      };
+    });
+    return {
+      roomId: String(roomId),
+      startTime: instanceCase.startTime,
+      endTime: instanceCase.endTime,
+      members,
+      updatedAt: new Date().toISOString()
+    };
+  };
+
   Object.assign(fastify[options.name].services, {
     startAITranscription,
     stopAITranscription,
@@ -602,6 +667,7 @@ module.exports = fp(async (fastify, options) => {
     dismiss,
     removeMember,
     checkRecord,
-    syncRoomUserEvents
+    syncRoomUserEvents,
+    getRoomSnapshot
   });
 });
