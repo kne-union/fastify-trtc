@@ -471,7 +471,8 @@ describe('@kne/fastify-trtc', function () {
       expect(task.stopTime).to.exist;
       expect(mockTrtcCalls.some(item => item.method === 'StopAITranscription')).to.be.true;
       const stopCall = mockTrtcCalls.find(item => item.method === 'StopAITranscription');
-      expect(stopCall.params).to.include({ SdkAppId: 1400000000, TaskId: task.taskId });
+      expect(stopCall.params).to.deep.equal({ TaskId: task.taskId });
+      expect(stopCall.params).to.not.have.property('SdkAppId');
     });
 
     it('should reuse active ai transcription task without creating duplicate task', async () => {

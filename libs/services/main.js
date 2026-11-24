@@ -424,8 +424,9 @@ module.exports = fp(async (fastify, options) => {
       id,
       roomId,
       options,
-      callback: (client, args) => {
-        return client.StopAITranscription(Object.assign({}, args));
+      // StopAITranscription（转录 1.0）仅接受 TaskId；传入 SdkAppId 会被腾讯云拒绝
+      callback: (client, { TaskId }) => {
+        return client.StopAITranscription({ TaskId });
       }
     });
   };
