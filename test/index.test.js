@@ -462,7 +462,7 @@ describe('@kne/fastify-trtc', function () {
       expect(task.type).to.equal('ai_transcription');
       const startCall = mockTrtcCalls.find(item => item.method === 'StartAITranscription');
       expect(startCall.params.RoomId).to.equal(roomId);
-      expect(startCall.params.TranscriptionParams.UserId).to.equal(`ai_transcription_${roomId}`);
+      expect(startCall.params.TranscriptionParams.UserId).to.match(/^asr_[0-9a-f]{16}$/);
       expect(startCall.params.RecognizeConfig.Language).to.equal('en');
       expect(startCall.params.RecognizeConfig.HotWordList).to.deep.equal(['fastify']);
 
@@ -487,6 +487,62 @@ describe('@kne/fastify-trtc', function () {
       expect(mockTrtcCalls.some(item => item.method === 'DescribeAIConversation' && item.params.SdkAppId === 1400000000 && item.params.TaskId === task.taskId)).to.be.true;
       expect(mockTrtcCalls.filter(item => item.method === 'StartAITranscription').length).to.equal(startCallCount);
       expect(await fastify.trtc.models.task.count({ where: { type: 'ai_transcription' } })).to.equal(1);
+    });
+
+    it('should use unique robot user id within 32 bytes for each task in same room', async () => {
+      const roomId = 'room_robot_unique_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+
+      await fastify.trtc.services.startRecord({ roomId });
+      await fastify.trtc.services.startRecord({ roomId });
+      await fastify.trtc.services.startAITranscription({ roomId });
+
+      const recordUserIds = mockTrtcCalls.filter(item => item.method === 'CreateCloudRecording').map(item => item.params.UserId);
+      const aiUserId = mockTrtcCalls.find(item => item.method === 'StartAITranscription').params.TranscriptionParams.UserId;
+      expect(recordUserIds).to.have.length(2);
+      expect(recordUserIds[0]).to.match(/^rec_[0-9a-f]{16}$/);
+      expect(recordUserIds[0]).to.not.equal(recordUserIds[1]);
+      [...recordUserIds, aiUserId].forEach(userId => expect(Buffer.byteLength(userId)).to.be.at.most(32));
+    });
+
+    it('should stop active task of same type in same room before starting a new one', async () => {
+      const roomId = 'room_stop_active_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+
+      const firstRecord = await fastify.trtc.services.startRecord({ roomId });
+      const firstAi = await fastify.trtc.services.startAITranscription({ roomId });
+      const secondRecord = await fastify.trtc.services.startRecord({ roomId });
+
+      await firstRecord.reload();
+      await firstAi.reload();
+      expect(firstRecord.stopTime).to.exist;
+      expect(mockTrtcCalls.some(item => item.method === 'DeleteCloudRecording' && item.params.TaskId === firstRecord.taskId)).to.be.true;
+      expect(firstAi.stopTime).to.not.exist;
+      expect(secondRecord.stopTime).to.not.exist;
+
+      await fastify.trtc.services.startAITranscription({ roomId });
+      await firstAi.reload();
+      expect(firstAi.stopTime).to.exist;
+      expect(mockTrtcCalls.some(item => item.method === 'StopAITranscription' && item.params.TaskId === firstAi.taskId)).to.be.true;
+    });
+
+    it('should still start new task when stopping active task fails', async () => {
+      const roomId = 'room_stop_active_fail_001';
+      await fastify.trtc.services.join({ roomId, userId: 'user_001' });
+      const firstRecord = await fastify.trtc.services.startRecord({ roomId });
+
+      const originalDelete = MockTrtcClient.prototype.DeleteCloudRecording;
+      MockTrtcClient.prototype.DeleteCloudRecording = async () => {
+        throw new Error('mock delete failed');
+      };
+      try {
+        const secondRecord = await fastify.trtc.services.startRecord({ roomId });
+        expect(secondRecord.id).to.not.equal(firstRecord.id);
+      } finally {
+        MockTrtcClient.prototype.DeleteCloudRecording = originalDelete;
+      }
+      await firstRecord.reload();
+      expect(firstRecord.stopTime).to.not.exist;
     });
 
     it('should support explicit string room type for record task', async () => {
