@@ -1,4 +1,5 @@
 const fp = require('fastify-plugin');
+const crypto = require('node:crypto');
 const TLSSigAPIv2 = require('tls-sig-api-v2');
 const tencentcloud = require('tencentcloud-sdk-nodejs-trtc');
 
@@ -327,10 +328,33 @@ module.exports = fp(async (fastify, options) => {
     throw new Error('id和roomId不能同时为空');
   };
 
+  // 腾讯云按「房间 + 机器人 UserId」判重，且停止任务后机器人异步退房；
+  // 每个任务独立生成 UserId，TRTC UserId 上限 32 字节
+  const robotUserIdPrefix = { record: 'rec', ai_transcription: 'asr' };
+  const createRobotUserId = type => `${robotUserIdPrefix[type] || type}_${crypto.randomBytes(8).toString('hex')}`;
+
+  // 同一房间同类型只保留一个运行中任务，开新任务前回收遗留任务，避免机器人泄漏
+  const stopActiveTasks = async ({ instanceCase, type, roomId, options }) => {
+    const stop = { record: stopRecord, ai_transcription: stopAITranscription }[type];
+    if (!stop) {
+      return;
+    }
+    const activeTasks = await models.task.findAll({
+      where: { trtcInstanceCaseId: instanceCase.id, type, stopTime: null }
+    });
+    const results = await Promise.allSettled(activeTasks.map(({ id }) => stop({ id, roomId, options })));
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        console.error(`Failed to stop active TRTC ${type} task ${activeTasks[index].taskId}:`, result.reason);
+      }
+    });
+  };
+
   const startTask = async ({ roomId, type, options, callback }) => {
     const instanceCase = await instanceCaseDetail({ roomId });
+    await stopActiveTasks({ instanceCase, type, roomId, options });
     const client = getTrtcClient(options);
-    const userSig = getUserSig(`${type}_${roomId}`, options);
+    const userSig = getUserSig(createRobotUserId(type), options);
     const { RequestId, TaskId } = await callback(client, {
       UserId: userSig.userId,
       UserSig: userSig.userSig,
